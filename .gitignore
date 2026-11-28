@@ -1,0 +1,4 @@
+﻿# videos stay local (GitHub refuses files over 100 MB; the demo asks visitors for their own video)
+*.mp4
+*.mov
+

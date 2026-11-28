@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Badminton Vision — Antoine Bui</title>
+  <meta name="description" content="Analyse vidéo de badminton dans le navigateur : joueurs, minimap, volant, vitesse et type de coup.">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../style.css">
+  <script>document.documentElement.setAttribute('data-theme', localStorage.getItem('theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'));</script>
+  <style>
+    /* One screen, no scrolling: top bar / app (video + panel) / one-line footer */
+    body { height: 100vh; height: 100dvh; display: flex; flex-direction: column; overflow: hidden; }
+    .topbar { display: flex; align-items: center; gap: 16px; padding: 10px 20px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+    .topbar h1 { font-size: 1.15rem; letter-spacing: -0.01em; white-space: nowrap; }
+    .topbar h1 .mono { color: var(--accent); font-size: .8rem; }
+    .actions { display: flex; gap: 8px; }
+    .actions .btn, .pick .btn { cursor: pointer; font: inherit; font-weight: 600; padding: 7px 14px; font-size: .88rem; }
+    .actions .btn-ghost { background: none; }
+    .btn-primary { border: 0; }
+    #file { display: none; }
+    #model { color: var(--muted); font-size: .8rem; margin-left: auto; }
+    .back { color: var(--muted); font-size: .85rem; white-space: nowrap; }
+    .back:hover { color: var(--accent); }
+
+    .app { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) clamp(240px, 22vw, 320px); gap: 14px; padding: 12px 20px; background: var(--bg); }
+    .theater { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+    #status { color: var(--muted); font-size: .88rem; min-height: 1.4em; margin-bottom: 6px; }
+    /* the stage keeps the video's aspect ratio and takes the largest size that fits (container query units) */
+    .screen { flex: 1; min-height: 0; container-type: size; display: grid; place-items: end center; } /* video sits on the control bar */
+    .stage { --ar: 16 / 9; position: relative; aspect-ratio: var(--ar); width: min(100cqw, 100cqh * (var(--ar))); background: #000; border-radius: var(--radius) var(--radius) 0 0; overflow: hidden; }
+    #video { width: 100%; height: 100%; display: block; }
+    #ahead { position: fixed; left: 0; top: 0; width: 1px; height: 1px; opacity: 0.01; pointer-events: none; }
+    #view { position: absolute; inset: 0; width: 100%; height: 100%; cursor: crosshair; }
+    .player { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: var(--surface); border: 1px solid var(--border); border-top: 0; border-radius: 0 0 var(--radius) var(--radius); align-self: center; width: 100%; } /* width set to the stage's by app.mjs */
+    .player button { background: none; border: 0; color: var(--text); font: 600 .88rem Inter, sans-serif; cursor: pointer; padding: 4px 6px; border-radius: 6px; min-width: 32px; }
+    .player button:hover, .player button:focus-visible { background: var(--accent-soft); color: var(--accent); }
+    .player input[type=range] { accent-color: var(--accent); }
+    #seek { flex: 1; min-width: 60px; }
+    #vol { width: 70px; }
+    #time { font-size: .78rem; color: var(--muted); white-space: nowrap; }
+
+    .panel { display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+    .panel .card { padding: 12px 14px; }
+    .panel .card:hover { transform: none; border-color: var(--border); }
+    .mini-card { flex: 1 1 auto; min-height: 140px; container-type: size; display: grid; place-items: center; }
+    #minimap { height: min(100cqh, 200cqw); width: auto; border-radius: 8px; display: block; } /* canvas is 1:2 */
+    .score { font-size: 1.3rem; display: flex; align-items: center; gap: 8px; margin-top: 2px; }
+    .score .chip { margin: 0; }
+    .score b { color: var(--accent); }
+    .sets { font-size: .75rem; color: var(--muted); }
+    .hitstats { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .hist { flex: 0 1 170px; min-height: 70px; display: flex; flex-direction: column; }
+    .label { color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .05em; }
+    .big { font-size: 1.4rem; font-weight: 700; color: var(--accent); line-height: 1.2; }
+    #shot { font-size: .85rem; }
+    .chip { display: inline-block; padding: 1px 8px; border-radius: 999px; background: var(--c); color: #000; font-size: .75rem; font-weight: 600; margin: 4px 4px 0 0; }
+    #track { margin-top: 6px; font-size: .78rem; color: var(--muted); }
+    #track::before { content: ''; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); margin-right: 6px; }
+    #track.ok { color: var(--text); }
+    #track.ok::before { background: #ffd23d; box-shadow: 0 0 6px #ffd23d; }
+    #track.ghost::before { background: #ffd23d; opacity: .5; }
+    #history { list-style: none; font-size: .8rem; display: grid; gap: 3px; overflow: auto; margin-top: 4px; align-content: start; }
+    .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; }
+
+    .pick { position: absolute; inset: 0; display: grid; place-content: center; gap: 14px; text-align: center; background: rgba(5, 8, 20, 0.78); color: #fff; padding: 20px; }
+    .pick[hidden] { display: none; }
+    .pick p { font-size: 1.2rem; font-weight: 600; }
+    .pick .row { display: flex; gap: 12px; justify-content: center; align-items: center; flex-wrap: wrap; }
+    .mode-card { display: grid; justify-items: center; gap: 4px; padding: 12px 18px 10px; border-radius: 12px; cursor: pointer;
+      background: rgba(255, 255, 255, 0.06); border: 2px solid rgba(255, 255, 255, 0.25); color: #fff; font: inherit; }
+    .mode-card:hover, .mode-card:focus-visible { border-color: var(--accent); background: rgba(123, 150, 255, 0.15); outline: none; }
+    .mode-card svg { height: min(40cqh, 260px); width: auto; display: block; margin-bottom: 4px; }
+    .mode-card svg text { font: 700 8px Inter, sans-serif; fill: #000; text-anchor: middle; }
+    .mode-card small { color: #c9cde0; }
+    .pick small { color: #c9cde0; max-width: 46ch; margin: 0 auto; }
+    .pick .btn-ghost { color: #fff; border-color: #fff; background: none; }
+
+    .foot { padding: 6px 20px; font-size: .75rem; color: var(--muted); border-top: 1px solid var(--border); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .foot a { color: var(--accent); }
+
+    /* chart colours: same hues as the video overlay (J1 red, J2 blue, J3 yellow, J4 green), stepped for each surface
+       and checked with the dataviz validator (lightness band, colour-blind separation, contrast) */
+    :root { --p1: #e34948; --p2: #2a78d6; --p3: #eda100; --p4: #008300; }
+    [data-theme="dark"] { --p1: #e66767; --p2: #3987e5; --p3: #c98500; --p4: #1baf7a; }
+    .app { position: relative; }
+    .stats-panel { position: absolute; inset: 0; z-index: 5; background: var(--bg); overflow: auto; padding: 14px 20px 20px; }
+    .stats-panel[hidden] { display: none; }
+    .stats-panel > header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 12px; }
+    .stats-panel h2 { font-size: 1.1rem; }
+    .stats-panel header small { color: var(--muted); }
+    .stats-panel header .btn { margin-left: auto; cursor: pointer; font: inherit; font-weight: 600; padding: 6px 14px; background: none; }
+    .dgrid-wrap { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .dtiles { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+    .dtile, .dcard { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; }
+    .dval { font-size: 1.5rem; font-weight: 700; line-height: 1.2; }
+    .dsub, .dnote, .dempty { color: var(--muted); font-size: .78rem; }
+    .dwide { grid-column: 1 / -1; }
+    .dcard h3 { font-size: .9rem; margin-bottom: 6px; }
+    .dsmall { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+    .dsmall figure { margin: 0; }
+    figcaption { font-size: .8rem; font-weight: 600; margin-bottom: 4px; }
+    figcaption i, .dlegend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+    .dchart { width: 100%; height: auto; display: block; overflow: visible; }
+    .dcourt { max-width: 220px; }
+    .dchart text { font: 11px Inter, sans-serif; }
+    .dtick { fill: var(--muted); }
+    .dlab, .dval2 { fill: var(--text); font-weight: 600; }
+    .dgrid { stroke: var(--border); stroke-width: 1; }
+    .dnet { stroke: var(--muted); stroke-width: 2; }
+    .dzone { stroke: var(--border); }
+    .dhit { fill: transparent; }
+    .dchart g:hover rect:not(.dhit), .dchart g:hover .dzone { stroke: var(--text); stroke-width: 1.5; }
+    .dlegend { display: flex; gap: 16px; font-size: .78rem; color: var(--muted); margin-top: 4px; }
+    .dtable { width: 100%; border-collapse: collapse; font-size: .82rem; }
+    .dtable th, .dtable td { padding: 6px 8px; border-bottom: 1px solid var(--border); text-align: right; }
+    .dtable th { font-weight: 600; }
+    .dtable th:first-child { text-align: left; }
+    .dtable thead th { color: var(--muted); font-size: .75rem; }
+    .dtip { position: fixed; z-index: 10; pointer-events: none; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; font-size: .8rem; box-shadow: var(--shadow); }
+    @media (max-width: 860px) { .dgrid-wrap, .dtiles { grid-template-columns: 1fr 1fr; } }
+
+    /* fullscreen = the whole app (video + panel), so every piece of info stays visible */
+    .app:fullscreen { padding: 14px; }
+    .app:fullscreen #status { color: var(--text); }
+
+    @media (max-width: 860px) {
+      body { height: auto; overflow: auto; }
+      .app { grid-template-columns: 1fr; }
+      .screen { flex: none; height: 56vw; }
+      .mini-card { height: 300px; flex: none; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <a href="../" class="logo">AB<span>.</span></a>
+    <h1>Badminton Vision <span class="mono">v1</span></h1>
+    <div class="actions">
+      <label for="file" class="btn btn-primary">Charger une vidéo</label>
+      <input type="file" id="file" accept="video/mp4,video/*">
+      <button class="btn btn-ghost cam-btn">Caméra en direct</button>
+      <button id="recal" class="btn btn-ghost">Recalibrer</button>
+      <button id="exportCsv" class="btn btn-ghost" disabled title="Un coup par ligne, au format du jeu de données ShuttleSet">Exporter CSV</button>
+    </div>
+    <span id="model">Chargement du modèle…</span>
+    <a href="../#projects" class="back mono">← Portfolio</a>
+  </header>
+
+  <main class="app" id="app">
+    <section class="theater">
+      <p id="status">Ajoutez une vidéo de badminton pour commencer.</p>
+      <div class="screen">
+        <div class="stage" id="stage">
+          <video id="video" playsinline loop preload="auto" muted></video>
+          <!-- twin of the video, analysed ~2 s ahead; 1 px and almost transparent (display:none would stop its decoding) -->
+          <video id="ahead" muted playsinline preload="auto" aria-hidden="true" tabindex="-1"></video>
+          <canvas id="view" aria-label="Analyse superposée à la vidéo"></canvas>
+          <div id="empty" class="pick">
+            <p>Ajoutez votre vidéo de badminton</p>
+            <div class="row">
+              <label for="file" class="btn btn-primary">Choisir un fichier vidéo</label>
+              <button class="btn btn-ghost cam-btn">Utiliser la caméra</button>
+            </div>
+            <small>Idéal : caméra fixe en hauteur derrière le fond de court, terrain entier visible. La vidéo reste sur votre appareil, rien n'est envoyé.</small>
+          </div>
+          <div id="modePick" class="pick" hidden>
+            <p>Combien de joueurs sur le terrain ?</p>
+            <div class="row">
+              <button class="mode-card" data-per-side="1"><span class="court" data-players="1"></span><b>1 contre 1</b><small>Simple</small></button>
+              <button class="mode-card" data-per-side="2"><span class="court" data-players="2"></span><b>2 contre 2</b><small>Double</small></button>
+            </div>
+            <small>En bas, côté caméra : J1 (et J2 en double). La main de chaque joueur (droitier ou gaucher) est détectée automatiquement pendant la vidéo.</small>
+          </div>
+        </div>
+      </div>
+      <div class="player">
+        <button id="back" aria-label="Reculer de 10 secondes">−10s</button>
+        <button id="play" aria-label="Lecture / Pause">▶</button>
+        <button id="fwd" aria-label="Avancer de 10 secondes">+10s</button>
+        <input id="seek" type="range" min="0" max="1000" value="0" aria-label="Position dans la vidéo">
+        <span id="time" class="mono">0:00 / 0:00</span>
+        <button id="mute" aria-label="Activer / couper le son">🔇</button>
+        <input id="vol" type="range" min="0" max="1" step="0.05" value="0" aria-label="Volume">
+        <button id="statsBtn" aria-label="Statistiques du match (S)" title="Statistiques du match (S)">Stats</button>
+        <button id="fs" aria-label="Plein écran (F)" title="Plein écran (F)">⛶</button>
+      </div>
+    </section>
+
+    <aside class="panel">
+      <div class="card mini-card"><canvas id="minimap" width="220" height="440" aria-label="Minimap du terrain"></canvas></div>
+      <div class="card scorecard">
+        <div class="label">Score · arbitre virtuel</div>
+        <div id="score" class="score">—</div>
+        <div id="sets" class="sets">—</div>
+      </div>
+      <div class="card hitstats">
+        <div>
+          <div class="label">Joueurs · <span id="mode">—</span></div>
+          <div class="big" id="count">0</div>
+          <div id="chips"></div>
+        </div>
+        <div>
+          <div class="label">Dernière frappe</div>
+          <div class="big" id="speed">—</div>
+          <div id="shot">—</div>
+        </div>
+        <div id="track" style="grid-column: 1 / -1">—</div>
+      </div>
+      <div class="card hist">
+        <div class="label">Historique</div>
+        <ul id="history"></ul>
+      </div>
+    </aside>
+    <section id="stats" class="stats-panel" hidden aria-label="Statistiques du match">
+      <header><h2>Statistiques du match</h2><small>Jusqu'à l'instant affiché · se met à jour pendant la lecture</small>
+        <button id="statsClose" class="btn btn-ghost" aria-label="Fermer les statistiques">Fermer</button></header>
+      <div id="statsBody" class="dgrid-wrap"></div>
+      <div id="dtip" class="dtip" hidden></div>
+    </section>
+  </main>
+
+  <footer class="foot" title="Espace : lecture/pause · ← / → : −10 s / +10 s · F : plein écran · S : statistiques">
+    Espace · ←/→ ±10 s · F plein écran · S stats ·
+    Volant : <a href="https://github.com/qaz812345/TrackNetV3" target="_blank" rel="noopener">TrackNetV3</a> (<a href="models/TrackNetV3-LICENSE.txt">MIT</a>) ·
+    Coups : modèle entraîné sur <a href="https://github.com/wywyWang/CoachAI-Projects" target="_blank" rel="noopener">ShuttleSet22 / CoachAI</a> (MIT, 51 000 coups pros, 80 % de bonnes réponses sur des matchs non vus) ·
+    Vitesse = distance ÷ temps de vol (freinage du volant)
+  </footer>
+
+  <script type="module" src="app.mjs"></script>
+</body>
+</html>
